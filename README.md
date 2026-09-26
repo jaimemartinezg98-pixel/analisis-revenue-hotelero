@@ -21,3 +21,4 @@ El objetivo de este análisis es extraer *insights* de negocio sobre el comporta
 3. **Elasticidad de tarifas:** El precio del hotel urbano se correlaciona con su demanda (0.58), mientras que el resort (0.43) mantiene tarifas de temporada rígidas, sugiriendo un margen de optimización en su estrategia de precios dinámicos.
 
 *Datos extraídos del dataset público "Hotel booking demand" (Antonio, Almeida y Nunes, 2019).*
+ 
