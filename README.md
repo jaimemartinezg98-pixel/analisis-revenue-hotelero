@@ -4,6 +4,8 @@ Este proyecto es un análisis exploratorio de casi 120.000 reservas hoteleras (u
 
 El objetivo de este análisis es extraer *insights* de negocio sobre el comportamiento de la demanda, la estacionalidad, los canales de distribución y la política de precios, simulando un encargo de consultoría para una cadena hotelera en expansión.
 
+👉 [Ver el análisis interactivo y los resultados aquí](https://jaimemartinez98.github.io/analisis-revenue-hotelero/)
+
 ## 🛠️ Herramientas y Técnicas Aplicadas
 * **Lenguaje:** R
 * **Librerías:** `tidyverse` (dplyr, tidyr, ggplot2, forcats, lubridate), `cowplot`.
