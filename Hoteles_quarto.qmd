@@ -1,0 +1,821 @@
+---
+title: "Análisis de demanda, precios y facturación hotelera"
+subtitle: "Dos hoteles en Portugal: resort y ciudad"
+author: "Jaime Martínez García"
+date: today
+lang: es
+format:
+  pdf:
+    toc: true
+    number-sections: true
+    fig-width: 8
+    fig-height: 5
+  html:
+    toc: true
+    code-fold: true
+execute:
+  warning: false
+  message: false
+editor_options:
+  chunk_output_type: console
+---
+
+## 1 - SET UP
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(cowplot)
+
+theme_set(theme_cowplot())
+```
+
+## 2 - CARGA DE DATOS
+
+Los datos corresponden a dos hoteles, uno resort y otro de ciudad. En total son casi 120.000 reservas y más de 30 variables en cada una de ellas.
+
+Se trata del conjunto de datos público "Hotel booking demand" (Antonio, Almeida y Nunes, 2019), disponible en Kaggle. El fichero está en la carpeta `data/`.
+
+```{r}
+#| label: carga
+
+df_raw <- read_csv("data/hoteles.csv", show_col_types = FALSE)
+```
+
+## 3 - CONTEXTO
+
+Planteamos el análisis como un encargo ficticio: trabajamos para una cadena hotelera que acaba de comprar 2 hoteles en Portugal, un resort en el Algarve y otro de ciudad en Lisboa.
+
+La cadena es un grupo privado con varias propiedades en US dirigidas a un público empresarial. Pero no tiene experiencia ni en el mercado europeo ni en esta tipología de hoteles.
+
+La dirección nos ha encargado estudiar el histórico de datos para generar insights que les permitan entender el comportamiento del consumidor y ver si hay diferencias o no entre ambos hoteles.
+
+Por tanto, los objetivos del proyecto son 3:
+
+1) Entender el comportamiento de los clientes de estos hoteles
+2) Ver si hay diferencias entre los patrones de ambos tipos de hoteles
+3) Localizar insights de interés que puedan ayudar a la dirección a hacer crecer el negocio
+
+## 4 - CALIDAD DE DATOS y EDA
+
+### 4.1 - Tipos de variables
+
+```{r}
+#| label: tipos
+
+glimpse(df_raw)
+
+# Detectamos las siguientes variables a cambiar de tipo
+a_factor <- c("hotel", "arrival_date_year", "arrival_date_month",
+              "arrival_date_week_number", "arrival_date_day_of_month",
+              "meal", "country", "market_segment", "distribution_channel",
+              "reserved_room_type", "assigned_room_type", "deposit_type",
+              "agent", "company", "customer_type", "reservation_status")
+
+a_logico <- c("is_canceled", "is_repeated_guest")
+
+a_discreto <- c("stays_in_weekend_nights", "stays_in_week_nights", "adults",
+                "children", "babies", "previous_cancellations",
+                "previous_bookings_not_canceled", "booking_changes",
+                "days_in_waiting_list", "required_car_parking_spaces",
+                "total_of_special_requests")
+
+# Realizamos el cambio
+df <- df_raw |>
+  mutate(
+    across(all_of(a_factor),   as.factor),
+    across(all_of(a_logico),   as.logical),
+    across(all_of(a_discreto), as.integer)
+  )
+```
+
+### 4.2 - Nulos
+
+```{r}
+#| label: nulos
+
+df |>
+  summarise(across(everything(), ~ sum(is.na(.x)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_nulos") |>
+  filter(n_nulos > 0)
+```
+
+No hay nulos, salvo 4 en children, pero en el glimpse habíamos visto la palabra 'NULL', así que vamos a buscarla
+
+```{r}
+#| label: nulos-ocultos
+
+df |>
+  summarise(across(everything(), ~ sum(as.character(.x) == "NULL", na.rm = TRUE))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_null_texto") |>
+  filter(n_null_texto > 0)
+```
+
+Conclusiones:
+
+- Eliminar `company` (94% de valores ausentes).
+- Imputar `country` (488 casos) y `children` (4 casos).
+
+### 4.3 - Valores atípicos y variables categóricas
+
+Separamos el análisis según el número de niveles de cada variable, porque
+las de muchas categorías no son legibles en un gráfico de barras.
+
+```{r}
+#| label: tbl-niveles
+#| tbl-cap: "Número de niveles de cada variable categórica"
+
+df |>
+  summarise(across(where(is.factor), n_distinct)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_niveles") |>
+  arrange(desc(n_niveles))
+```
+
+#### Variables con pocos niveles
+
+```{r}
+#| label: fig-categoricas
+#| fig-cap: "Distribución de las variables categóricas de pocos niveles"
+#| fig-width: 10
+#| fig-height: 8
+
+df |>
+  select(hotel, meal, market_segment, distribution_channel,
+         reserved_room_type, assigned_room_type, deposit_type,
+         customer_type, reservation_status, arrival_date_year) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  ggplot(aes(y = valor)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(x = "Número de reservas", y = NULL)
+```
+
+#### Estacionalidad: mes y semana de llegada
+
+```{r}
+#| label: fig-calendario
+#| fig-cap: "Reservas por mes y por semana del año"
+#| fig-width: 10
+#| fig-height: 7
+
+meses <- c("January", "February", "March", "April", "May", "June",
+           "July", "August", "September", "October", "November", "December")
+
+g_mes <- df |>
+  mutate(mes = factor(arrival_date_month, levels = meses)) |>
+  count(mes) |>
+  ggplot(aes(x = mes, y = n)) +
+  geom_col() +
+  labs(x = NULL, y = "Reservas") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+g_semana <- df |>
+  mutate(semana = as.integer(as.character(arrival_date_week_number))) |>
+  count(semana) |>
+  ggplot(aes(x = semana, y = n)) +
+  geom_line() +
+  labs(x = "Semana del año", y = "Reservas")
+
+plot_grid(g_mes, g_semana, ncol = 1)
+```
+
+#### Mercados de origen
+
+```{r}
+#| label: fig-paises
+#| fig-cap: "15 mercados de origen principales"
+#| fig-width: 8
+#| fig-height: 5
+
+df |>
+  count(country, sort = TRUE) |>
+  slice_head(n = 15) |>
+  mutate(proporcion = n / nrow(df)) |>
+  ggplot(aes(x = n, y = fct_reorder(country, n))) +
+  geom_col() +
+  geom_text(aes(label = scales::percent(proporcion, accuracy = 0.1)),
+            hjust = -0.15, size = 3) +
+  scale_x_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(x = "Número de reservas", y = NULL)
+```
+
+#### Variables descartadas
+
+```{r}
+#| label: tbl-descartadas
+#| tbl-cap: "Variables descartadas del análisis"
+
+tibble(
+  variable  = c("company", "agent"),
+  n_niveles = c(n_distinct(df$company), n_distinct(df$agent)),
+  pct_nulos = c(112593 / nrow(df) * 100, 16340 / nrow(df) * 100)
+)
+```
+
+Conclusiones:
+
+- En `market_segment`, unir Aviation y Complementary en Corporate, y Undefined en OTROS.
+- En `meal`, crear un indicador entre BB y OTROS.
+- En `assigned_room_type` y `reserved_room_type`, juntar todo excepto A y D.
+- En `customer_type`, dejar Transient y OTROS.
+- En `distribution_channel`, juntar Corporate y GDS, y Undefined en OTROS.
+- En `reservation_status`, juntar No-Show con Canceled.
+- En `deposit_type`, juntar Non Refund con Refundable y llamarlo Deposit.
+- En `country`, dejar los 15 mercados principales y agrupar el resto en OTROS.
+- Eliminar `company` (94% de nulos) y `agent` (código sin significado de negocio).
+
+### 4.4 - Distribución de las variables discretas
+
+```{r}
+#| label: fig-discretas
+#| fig-cap: "Distribución de las variables discretas"
+#| fig-width: 10
+#| fig-height: 8
+
+df |>
+  select(where(is.integer)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  ggplot(aes(x = valor)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(x = NULL, y = "Número de reservas")
+```
+
+El gráfico descarta 4 reservas con el número de niños ausente. Se imputan
+a cero en la sección 5.1.
+
+Las distribuciones están muy concentradas en el cero, así que conviene
+cuantificar qué porcentaje de reservas toma cada valor.
+
+```{r}
+#| label: tbl-discretas
+#| tbl-cap: "Resumen de las variables discretas"
+
+df |>
+  select(where(is.integer)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  group_by(variable) |>
+  summarise(media    = mean(valor, na.rm = TRUE),
+            maximo   = max(valor, na.rm = TRUE),
+            pct_cero = mean(valor == 0, na.rm = TRUE) * 100) |>
+  arrange(desc(pct_cero))
+```
+
+Conclusiones:
+
+- Pasar a indicadores: `babies`, `booking_changes`, `children`,
+  `previous_cancellations`, `required_car_parking_spaces`,
+  `total_of_special_requests`, `days_in_waiting_list` y
+  `previous_bookings_not_canceled`. Todas salvo `total_of_special_requests`
+  (58,9%) superan el 84% de valores a cero, así que como variables
+  numéricas aportan poca información.
+
+- Convertir `adults` a uno, dos y más de dos: se concentra en 1 y 2, con
+  una media de 1,86.
+
+- En `stays_in_week_nights`, juntar las de más de cuatro noches: la media
+  es de 2,5 aunque el máximo llega a 50.
+
+- En `stays_in_weekend_nights`, juntar en una noche y más de una.
+
+### 4.5 - Distribución de las variables continuas
+
+```{r}
+#| label: tbl-continuas
+#| tbl-cap: "Resumen de las variables continuas"
+
+df |>
+  select(lead_time, adr) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  group_by(variable) |>
+  summarise(minimo  = min(valor),
+            p25     = quantile(valor, 0.25),
+            mediana = median(valor),
+            media   = mean(valor),
+            p75     = quantile(valor, 0.75),
+            p99     = quantile(valor, 0.99),
+            maximo  = max(valor))
+```
+
+```{r}
+#| label: fig-continuas
+#| fig-cap: "Distribución del precio por noche y de la antelación de reserva"
+#| fig-width: 10
+#| fig-height: 4
+
+g_adr <- df |>
+  filter(adr < 500) |>
+  ggplot(aes(x = adr)) +
+  geom_histogram(bins = 60) +
+  labs(x = "Precio medio diario (EUR)", y = "Reservas")
+
+g_lead <- df |>
+  ggplot(aes(x = lead_time)) +
+  geom_histogram(bins = 60) +
+  labs(x = "Días de antelación", y = "Reservas")
+
+plot_grid(g_adr, g_lead, ncol = 2)
+```
+
+El histograma de precios excluye el valor extremo de 5.400 € para que la
+distribución sea legible.
+
+```{r}
+#| label: atipicos-adr
+
+df |>
+  filter(adr > 500 | adr < 0) |>
+  arrange(desc(adr)) |>
+  select(hotel, adr, reservation_status)
+```
+
+Conclusiones:
+
+- Eliminar el atípico de 5.400 EUR en `adr`: es 54 veces la media, está
+  muy alejado del percentil 99 y corresponde además a una reserva
+  cancelada.
+- Los valores de 510 y 508 EUR corresponden a estancias completadas y son
+  plausibles (habitaciones superiores en temporada alta), por lo que se
+  conservan.
+- Existe un único precio negativo (-6,38 EUR) en una estancia completada,
+  probablemente un ajuste o reembolso. Al tratarse de un caso aislado, no
+  afecta a los resultados.
+- `lead_time` llega a 737 días, pero la distribución es continua y los
+  valores son plausibles, por lo que no se eliminan.
+
+## 5 - TRANSFORMACIÓN DE DATOS
+
+### 5.1 - Corrección de nulos y recodificación
+
+```{r}
+#| label: recodificacion
+
+df_limpio <- df |>
+  filter(adr < 1000) |>
+  mutate(
+    children = replace_na(children, 0),
+    country  = fct_recode(country, "PRT" = "NULL"),
+    country  = fct_lump_n(country, n = 15, other_level = "OTROS"),
+
+    market_segment = fct_collapse(market_segment,
+      "Corporate" = c("Corporate", "Aviation", "Complementary"),
+      "OTROS"     = "Undefined"),
+
+    distribution_channel = fct_collapse(distribution_channel,
+      "Corporate" = c("Corporate", "GDS"),
+      "OTROS"     = "Undefined"),
+
+    reservation_status = fct_collapse(reservation_status,
+      "Canceled" = c("Canceled", "No-Show")),
+
+    deposit_type = fct_collapse(deposit_type,
+      "Deposit" = c("Non Refund", "Refundable")),
+
+    meal = fct_other(meal, keep = "BB", other_level = "OTROS"),
+
+    customer_type = fct_other(customer_type,
+      keep = "Transient", other_level = "OTROS"),
+
+    assigned_room_type = fct_other(assigned_room_type,
+      keep = c("A", "D"), other_level = "OTROS"),
+
+    reserved_room_type = fct_other(reserved_room_type,
+      keep = c("A", "D"), other_level = "OTROS")
+  ) |>
+  select(-company, -agent)
+```
+
+Comprobamos el resultado:
+
+```{r}
+#| label: comprobacion
+
+levels(df_limpio$meal)
+levels(df_limpio$deposit_type)
+n_distinct(df_limpio$country)
+```
+
+### 5.2 - Discretización y creación de indicadores
+
+```{r}
+#| label: discretizacion
+
+df_limpio <- df_limpio |>
+  mutate(
+    adults_grupo = factor(case_when(
+      adults <= 1 ~ "01_Uno",
+      adults == 2 ~ "02_Dos",
+      adults >  2 ~ "03_Mas_de_Dos",
+      .default    = "99_ERROR")),
+
+    noches_semana_grupo = factor(case_when(
+      stays_in_week_nights <= 1 ~ "01_Uno",
+      stays_in_week_nights == 2 ~ "02_Dos",
+      stays_in_week_nights == 3 ~ "03_Tres",
+      stays_in_week_nights == 4 ~ "04_Cuatro",
+      stays_in_week_nights >  4 ~ "05_Mas_de_Cuatro",
+      .default                  = "99_ERROR")),
+
+    noches_finde_grupo = factor(case_when(
+      stays_in_weekend_nights <= 1 ~ "01_Uno",
+      stays_in_weekend_nights >  1 ~ "02_Mas_de_Uno",
+      .default                     = "99_ERROR")),
+
+    across(c(babies, children, booking_changes, previous_cancellations,
+             previous_bookings_not_canceled, days_in_waiting_list,
+             required_car_parking_spaces, total_of_special_requests),
+           ~ .x > 0,
+           .names = "ind_{.col}")
+  )
+```
+
+Comprobamos la distribución de las variables tras la transformación.
+
+```{r}
+#| label: fig-comprobacion
+#| fig-cap: "Distribución de las variables tras la recodificación"
+#| fig-width: 10
+#| fig-height: 6
+
+df_limpio |>
+  select(meal, market_segment, distribution_channel, reserved_room_type,
+         assigned_room_type, deposit_type, customer_type, reservation_status,
+         adults_grupo, noches_semana_grupo, noches_finde_grupo) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  ggplot(aes(y = valor)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(x = "Número de reservas", y = NULL)
+```
+
+```{r}
+#| label: fig-paises-recod
+#| fig-cap: "Distribución de los mercados tras agrupar en OTROS"
+#| fig-width: 7
+#| fig-height: 4
+
+df_limpio |>
+  ggplot(aes(y = fct_infreq(country))) +
+  geom_bar() +
+  labs(x = "Número de reservas", y = NULL)
+```
+
+```{r}
+#| label: fig-indicadores
+#| fig-cap: "Distribución de los indicadores"
+#| fig-width: 10
+#| fig-height: 6
+
+df_limpio |>
+  select(where(is.logical)) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "valor") |>
+  ggplot(aes(x = valor)) +
+  geom_bar() +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  labs(x = NULL, y = "Número de reservas")
+```
+
+### 5.3 - Creación de variables sintéticas
+
+A partir de la información original podemos crear las siguientes variables con
+significado de negocio:
+
+- `fecha_llegada`: a partir de año, mes y día.
+- `familia`: a partir de adultos, niños y bebés.
+- `extranjero`: verdadero si el cliente no es portugués.
+- `cambio_habit`: verdadero si la habitación asignada difiere de la reservada.
+- `noches_totales`: suma de las noches de fin de semana y entre semana.
+- `facturacion_reserva`: noches totales por el precio medio diario.
+
+```{r}
+#| label: variables-sinteticas
+
+df_final <- df_limpio |>
+  mutate(
+    mes_num = match(as.character(arrival_date_month), month.name),
+    dia_num = as.integer(as.character(arrival_date_day_of_month)),
+    anio    = as.integer(as.character(arrival_date_year)),
+
+    fecha_llegada = make_date(anio, mes_num, dia_num),
+
+    familia = factor(case_when(
+      adults <= 1 & children + babies == 0 ~ "01_Soltero",
+      adults <= 1 & children + babies >  0 ~ "02_Monoparental",
+      adults == 2 & children + babies == 0 ~ "03_Pareja_Sin_Hijos",
+      adults == 2 & children + babies >  0 ~ "04_Pareja_Con_Hijos",
+      adults >  2 & children + babies == 0 ~ "05_Grupo_Amigos",
+      adults >  2 & children + babies >  0 ~ "06_Grupo_Con_Hijos",
+      .default = "99_ERROR")),
+
+    extranjero     = country != "PRT",
+    cambio_habit   = reserved_room_type != assigned_room_type,
+    noches_totales = stays_in_weekend_nights + stays_in_week_nights,
+
+    facturacion_reserva = noches_totales * adr
+  ) |>
+  select(-mes_num, -dia_num)
+```
+
+```{r}
+#| label: comprobacion-sinteticas
+
+glimpse(df_final)
+
+count(df_final, familia)
+```
+
+## 6 - DISCOVERY Y GENERACIÓN DE INSIGHTS
+
+### 6.1 - Análisis de estacionalidad
+
+¿Cuáles son las temporadas altas y bajas? ¿Hay diferencias entre los dos hoteles?
+
+Usamos 2016 por ser el único año natural completo.
+
+```{r}
+#| label: fig-estacionalidad
+#| fig-cap: "Densidad de llegadas en 2016 por tipo de hotel"
+
+df_final |>
+  filter(anio == 2016) |>
+  ggplot(aes(x = fecha_llegada, color = hotel)) +
+  geom_density(linewidth = 1.2) +
+  scale_x_date(date_breaks = "1 month", date_labels = "%b",
+               expand = c(0, 0)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = "Densidad de llegadas", color = "Hotel")
+```
+
+Conclusiones:
+
+- Mayo y octubre son los meses de mayor demanda.
+- De diciembre a febrero son los de menor demanda.
+- Julio y agosto son relativamente bajos, algo llamativo para un resort.
+- Ambos hoteles mantienen curvas parecidas, pero el resort tiene algo más de
+  demanda hasta primavera y el urbano destaca en junio, septiembre y octubre.
+
+### 6.2 - Análisis de facturación
+
+Para la facturación nos quedamos solo con las reservas que finalmente tuvieron
+check-out.
+
+```{r}
+#| label: fig-facturacion
+#| fig-cap: "Facturación anual por hotel"
+
+df_final |>
+  filter(reservation_status == "Check-Out") |>
+  group_by(anio, hotel) |>
+  summarise(facturacion = sum(facturacion_reserva), .groups = "drop") |>
+  ggplot(aes(x = factor(anio), y = facturacion, fill = hotel)) +
+  geom_col(position = "dodge") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = NULL, y = "Facturación (EUR)", fill = "Hotel")
+```
+
+En este negocio la facturación puede crecer por tres motivos: más reservas,
+más noches por reserva o un precio por noche más alto. Descomponemos el
+crecimiento para ver cuál pesa más.
+
+La comparación se restringe a los meses de julio a diciembre porque los datos
+comienzan el 1 de julio de 2015. Comparar los años completos sobrestimaría el
+crecimiento de 2016.
+
+```{r}
+#| label: tbl-descomposicion
+#| tbl-cap: "Descomposición del crecimiento, julio-diciembre de cada año"
+
+df_final |>
+  filter(reservation_status == "Check-Out",
+         anio %in% c(2015, 2016),
+         month(fecha_llegada) >= 7) |>
+  group_by(hotel, anio) |>
+  summarise(num_reservas       = n(),
+            noches_por_reserva = mean(noches_totales),
+            precio_noche       = mean(adr),
+            facturacion        = sum(facturacion_reserva),
+            .groups = "drop")
+```
+
+¿Todos los segmentos contribuyen igual a la facturación?
+
+```{r}
+#| label: tbl-segmentos
+#| tbl-cap: "Contribución a la facturación por segmento de mercado"
+
+df_final |>
+  filter(reservation_status == "Check-Out") |>
+  group_by(hotel, market_segment) |>
+  summarise(facturacion = sum(facturacion_reserva), .groups = "drop_last") |>
+  mutate(pct = facturacion / sum(facturacion) * 100) |>
+  ungroup() |>
+  arrange(hotel, desc(pct))
+```
+
+¿Y todos los tipos de cliente?
+
+```{r}
+#| label: tbl-familias
+#| tbl-cap: "Contribución a la facturación por tipo de cliente"
+
+df_final |>
+  filter(reservation_status == "Check-Out") |>
+  group_by(hotel, familia) |>
+  summarise(facturacion = sum(facturacion_reserva), .groups = "drop_last") |>
+  mutate(pct = facturacion / sum(facturacion) * 100) |>
+  ungroup() |>
+  arrange(hotel, desc(pct))
+```
+
+Conclusiones:
+
+- Comparando periodos equivalentes (julio-diciembre), la facturación del
+  hotel urbano se duplicó entre 2015 y 2016, impulsada sobre todo por el
+  aumento de reservas (+56%) y también por la subida del precio medio (+26%).
+- En el resort el crecimiento fue más moderado (+18%) y se explica más por el
+  precio (+15%) que por el volumen de reservas (+8%).
+- La comparación de años completos sobrestimaba el crecimiento del hotel
+  urbano, porque 2015 solo contiene datos desde julio.
+- La mayor parte de la facturación proviene del canal de agencias online y de
+  las parejas sin hijos.
+
+### 6.3 - Análisis del mercado y del cliente
+
+¿Los clientes son nacionales o extranjeros?
+
+```{r}
+#| label: tbl-extranjeros
+#| tbl-cap: "Origen nacional o extranjero por hotel"
+
+df_final |>
+  count(hotel, extranjero) |>
+  group_by(hotel) |>
+  mutate(pct = n / sum(n) * 100) |>
+  ungroup()
+```
+
+¿Cuáles son las nacionalidades más frecuentes?
+
+```{r}
+#| label: tbl-nacionalidades
+#| tbl-cap: "Cinco nacionalidades principales por hotel"
+
+df_final |>
+  count(hotel, country) |>
+  group_by(hotel) |>
+  mutate(pct = n / sum(n) * 100) |>
+  slice_max(pct, n = 5) |>
+  ungroup() |>
+  arrange(hotel, desc(pct))
+```
+
+Conclusiones:
+
+- La mayoría de los clientes son extranjeros, sin grandes diferencias entre
+  hoteles.
+- Los portugueses son mayoritarios en ambos, pero los siguientes mercados
+  difieren: franceses y alemanes en el urbano, británicos y españoles en el
+  resort.
+
+### 6.4 - Análisis de precios
+
+¿Varía mucho el precio por noche a lo largo del año?
+
+```{r}
+#| label: fig-precios-semana
+#| fig-cap: "Precio medio por semana del año, por hotel"
+#| fig-width: 10
+
+semanal <- df_final |>
+  filter(anio %in% c(2015, 2016)) |>
+  mutate(semana = as.integer(as.character(arrival_date_week_number))) |>
+  group_by(hotel, semana) |>
+  summarise(num_reservas = n(),
+            precio_medio = mean(adr),
+            .groups = "drop")
+
+semanal |>
+  ggplot(aes(x = semana, y = precio_medio)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_smooth(se = FALSE, linewidth = 1.2, color = "firebrick") +
+  facet_wrap(~ hotel, ncol = 1) +
+  labs(x = "Semana del año", y = "Precio medio por noche (EUR)")
+```
+
+¿Se correlacionan los precios con la demanda? La correlación se calcula por
+separado para cada hotel, porque parten de niveles de precio distintos.
+
+```{r}
+#| label: tbl-correlacion
+#| tbl-cap: "Correlación entre demanda y precio medio semanal"
+
+semanal |>
+  group_by(hotel) |>
+  summarise(correlacion = cor(num_reservas, precio_medio))
+```
+
+¿Cuál es el precio en cada hotel?
+
+```{r}
+#| label: fig-precio-hotel
+#| fig-cap: "Distribución del precio por noche en cada hotel"
+
+df_final |>
+  ggplot(aes(x = hotel, y = adr, fill = hotel)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(x = NULL, y = "Precio medio diario (EUR)")
+```
+
+¿Se ahorra reservando con antelación?
+
+```{r}
+#| label: fig-antelacion
+#| fig-cap: "Precio medio según los días de antelación de la reserva"
+#| fig-width: 9
+
+df_final |>
+  group_by(hotel, lead_time) |>
+  summarise(precio_medio = mean(adr), .groups = "drop") |>
+  ggplot(aes(x = lead_time, y = precio_medio, color = hotel)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(se = FALSE, linewidth = 1.2) +
+  labs(x = "Días de antelación", y = "Precio medio por noche (EUR)", color = "Hotel")
+```
+
+Conclusiones:
+
+- Existe una estacionalidad clara en los precios, con máximos en verano.
+- La correlación entre demanda y precio es moderada en ambos hoteles y más
+  fuerte en el urbano.
+- El precio mediano es ligeramente superior en el hotel urbano.
+- Reservando con más de seis meses de antelación se obtienen precios medios
+  claramente más bajos en los dos hoteles.
+
+## 7 - CONCLUSIONES Y RECOMENDACIONES
+
+### Comportamiento del cliente
+
+- El cliente dominante son las parejas sin hijos, que generan el 64% de la
+  facturación del hotel urbano y el 71% de la del resort.
+- La mayoría de los clientes son extranjeros (61% en el urbano, 55% en el
+  resort), aunque Portugal es el primer mercado en ambos.
+- Las agencias de viaje online son el canal principal: aportan el 61% de la
+  facturación del hotel urbano y el 43% de la del resort. Sumando las
+  agencias offline, los intermediarios generan el 79% de la facturación del
+  urbano y cerca del 70% de la del resort.
+- El peso de las agencias online es mayor si se cuentan todas las reservas
+  que si se cuentan solo las completadas, lo que sugiere que este canal
+  concentra una parte importante de las cancelaciones.
+
+### Diferencias entre los dos hoteles
+
+- Estacionalidad: ambos hoteles concentran la demanda en mayo y octubre y la
+  pierden de diciembre a febrero, pero el resort tiene más demanda hasta
+  primavera y el urbano destaca en junio, septiembre y octubre.
+- Estancia y precio: la estancia media es más larga en el resort (4,3 noches
+  frente a 3,0 en el segundo semestre de 2016) y el precio medio es algo
+  superior en el urbano (111 € frente a 103 €).
+- Composición del cliente: tras las parejas sin hijos, el urbano atrae a
+  viajeros solos (15%) y el resort a familias con hijos (13%). En origen,
+  el urbano recibe sobre todo franceses y alemanes, y el resort británicos
+  y españoles.
+- Canales: el resort depende menos de los intermediarios y tiene el doble de
+  peso de venta directa que el urbano (21% frente a 11,5%).
+- Crecimiento: el hotel urbano creció sobre todo por volumen de reservas,
+  mientras que el resort lo hizo más por precio.
+- Política de precios: el precio acompaña más a la demanda en el hotel
+  urbano (correlación de 0,58) que en el resort (0,43), que parece seguir
+  tarifas de temporada más estables.
+
+### Recomendaciones
+
+1. Reducir la dependencia de los intermediarios potenciando la venta
+   directa, especialmente en el hotel urbano, donde solo representa el
+   11,5% de la facturación frente al 21% del resort.
+2. Analizar la tasa de cancelación por canal y, si se confirma que las
+   agencias online cancelan más, valorar políticas de depósito o tarifas no
+   reembolsables en ese canal.
+3. Revisar la política de precios dinámicos del resort. Su precio responde
+   menos a la demanda que el del urbano, lo que sugiere margen para ajustar
+   tarifas en las semanas de mayor ocupación.
+4. Diseñar campañas para los meses de diciembre a febrero dirigidas a los
+   mercados principales de cada hotel: británicos y españoles en el resort,
+   franceses y alemanes en el urbano.
+5. Evaluar los descuentos por reserva anticipada: las reservas con más de
+   seis meses de antelación obtienen precios claramente más bajos, lo que
+   conviene contrastar con el beneficio de asegurar ocupación con tiempo.
+
+### Limitaciones del análisis
+
+- Los datos abarcan de julio de 2015 a agosto de 2017, por lo que solo 2016
+  es un año natural completo. Las comparaciones interanuales se han
+  restringido a periodos equivalentes.
+- No se dispone de información de costes ni de comisiones de los canales,
+  por lo que el análisis se limita a ingresos y no a rentabilidad.
+- La facturación se estima como noches por precio medio diario y no incluye
+  otros ingresos como restauración o servicios adicionales.
+- Las reservas canceladas se excluyen del cálculo de facturación pero se
+  conservan en el análisis de demanda.
